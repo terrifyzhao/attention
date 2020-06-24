@@ -120,27 +120,32 @@ class DilationAttention(Layer):
         return x
 
 
+class TestModel(Layer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.embedding = Embedding(88586, 256)
+        self.attention = DilationAttention(64, 4)
+
+    def call(self, inputs, training=None, mask=None):
+        x, mask = inputs
+        x = self.embedding(inputs)
+        x = self.attention([x, x, x, mask])
+        return x
+
+
 if __name__ == '__main__':
     imdb = tf.keras.datasets.imdb
     (x_train, y_train), (x_test, y_test) = imdb.load_data()
     x_train = pad_sequences(x_train, 200)
 
     x = Input([200, ])
-    mask = Input([7, ])
+    mask = Input([200, ])
 
-    tf.keras.models.Sequential([
-        Embedding(88586, 256),
-        DilationAttention(64, 4)
-    ])
-
-    embedding = Embedding(88586, 256)
-    attention = DilationAttention(64, 4)
-    x = embedding(x)
-    y = attention([x, mask])
-    model = Model([x, mask], y)
+    out = TestModel([x, mask])
+    model = Model(([x, mask], out))
     model.compile(
         loss='sparse_categorical_crossentropy',
         optimizer=tf.keras.optimizers.Adam(1e-5),
         metrics=['accuracy']
     )
-    model.fit(x_train, y_train, batch_size=32, epochs=2)
+    model.fit(x_train, y_train, batch_size=32, epochs=1)
