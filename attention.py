@@ -125,11 +125,14 @@ class TestModel(Layer):
         super().__init__(*args, **kwargs)
         self.embedding = Embedding(88586, 256)
         self.attention = DilationAttention(64, 4)
+        self.act = Dense(1, activation='sigmoid')
 
     def call(self, inputs, training=None, mask=None):
         x, mask = inputs
         x = self.embedding(inputs)
         x = self.attention([x, x, x, mask])
+        x = tf.reduce_mean(x, axis=1)
+        x = self.act(x)
         return x
 
 
@@ -138,8 +141,8 @@ if __name__ == '__main__':
     (x_train, y_train), (x_test, y_test) = imdb.load_data()
     x_train = pad_sequences(x_train, 200)
 
-    x = Input([200, ])
-    mask = Input([200, ])
+    x = Input([200, ],dtype='int32')
+    mask = Input([200, ],dtype='int32')
 
     out = TestModel([x, mask])
     model = Model(([x, mask], out))
@@ -148,4 +151,7 @@ if __name__ == '__main__':
         optimizer=tf.keras.optimizers.Adam(1e-5),
         metrics=['accuracy']
     )
-    model.fit(x_train, y_train, batch_size=32, epochs=1)
+    import numpy as np
+
+    m = np.ones([25000, 200])
+    model.fit([x_train, m], y_train, batch_size=32, epochs=1)
