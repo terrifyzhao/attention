@@ -1,157 +1,80 @@
-import tensorflow as tf
-from tensorflow.keras.layers import *
-from tensorflow.keras.layers import Layer
-from tensorflow.keras import Model
-from utils import create_initializer, pad_sequences
-from tensorflow import keras
-
-tf.config.experimental_run_functions_eagerly(False)
+import torch
+import torch.nn as nn
+import math
 
 
-class SelfAttention(Layer):
-    def __init__(self,
-                 hidden_size,
-                 num_attention_heads,
-                 attention_probs_dropout_prob=0.1,
-                 initializer_range=0.02,
-                 **kwargs):
-        super().__init__(**kwargs)
-        assert hidden_size % num_attention_heads == 0
-        self.d_k = hidden_size // num_attention_heads
+class BaseAttention(nn.Module):
+    def __init__(self, hidden_size, num_attention_heads, all_head_size):
+        super().__init__()
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
-        self.drop_out = Dropout(attention_probs_dropout_prob)
-        self.q_matrix = Dense(self.hidden_size,
-                              kernel_initializer=create_initializer(initializer_range),
-                              name='query')
-        self.k_matrix = Dense(self.hidden_size,
-                              kernel_initializer=create_initializer(initializer_range),
-                              name='key')
-        self.v_matrix = Dense(self.hidden_size,
-                              kernel_initializer=create_initializer(initializer_range),
-                              name='value')
+        self.all_head_size = all_head_size
 
-    def call(self, inputs, training=False, mask=None):
-        query, key, value = inputs
+        self.head_size = self.all_head_size // num_attention_heads
 
-        mask = tf.cast(tf.expand_dims(mask, axis=1), dtype=tf.float32)
-        ones = tf.expand_dims(tf.ones(shape=tf.shape(query)[:2], dtype=tf.float32), axis=-1)
-        attention_mask = ones * mask
+        self.query = nn.Linear(hidden_size, all_head_size)
+        self.key = nn.Linear(hidden_size, all_head_size)
+        self.value = nn.Linear(hidden_size, all_head_size)
 
-        query = self.q_matrix(query)
-        key = self.k_matrix(key)
-        value = self.v_matrix(value)
+    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.head_size)
+        x = x.view(new_x_shape)
+        return x.permute(0, 2, 1, 3)
 
-        # [batch_size, seq_len, n_heads, head_size]
-        query = tf.reshape(query, [-1, tf.shape(query)[1], self.num_attention_heads, self.d_k])
-        key = tf.reshape(key, [-1, tf.shape(key)[1], self.num_attention_heads, self.d_k])
-        value = tf.reshape(value, [-1, tf.shape(value)[1], self.num_attention_heads, self.d_k])
+    def forward(self, x):
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
 
-        query = tf.transpose(query, [0, 2, 1, 3])
-        key = tf.transpose(key, [0, 2, 1, 3])
-        value = tf.transpose(value, [0, 2, 1, 3])
+        q = self.transpose_for_scores(q)
+        k = self.transpose_for_scores(k)
+        v = self.transpose_for_scores(v)
 
-        # [batch_size, n_heads, seq_len, seq_len]
-        out = tf.matmul(query, key, transpose_b=True) / (self.d_k ** 0.5)
+        return x, q, k, v
 
-        if attention_mask is not None:
-            attention_mask = tf.expand_dims(attention_mask, axis=1)
-            # {1: position, 0: mask} -> {0: position, -10000: mask}
-            adder = (1.0 - tf.cast(attention_mask, dtype=tf.float32)) * -1e8
-            out += adder
 
-        out = tf.nn.softmax(out, axis=-1)
-        out = self.drop_out(out, training=training)
-        #  [batch_size, n_heads, seq_len, head_size]
-        out = tf.matmul(out, value)
-        out = tf.transpose(out, [0, 2, 1, 3])
-        out = tf.reshape(out, [-1, tf.shape(out)[1], self.hidden_size])
+class SelfAttention(BaseAttention):
+    def __init__(self, hidden_size, num_attention_heads, all_head_size):
+        super().__init__(hidden_size, num_attention_heads, all_head_size)
 
+    def forward(self, x):
+        x, q, k, v = super().forward(x)
+        out_shape = x.size()
+        attention_scores = torch.matmul(q, k.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.head_size)
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        out = torch.matmul(attention_probs, v)
+        out = out.permute(0, 2, 1, 3)
+        out = out.reshape(out_shape)
         return out
 
 
-class DilationAttention(Layer):
-    """
-    思路是把间隔dilation_rate的元素组成一个张量，
-    例如[1,2,3,4,5]->[1,2,3,4,5,0]->[[1,2],[3,4],[5,0]]->[[1,3,5],[2,4,0]]
-    此时再做attention就是dilation attention
-    """
+class HydraAttention(BaseAttention):
 
-    def __init__(self,
-                 hidden_size,
-                 num_attention_heads,
-                 dilation_rate=1,
-                 attention_probs_dropout_prob=0.1,
-                 initializer_range=0.02,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.dilation_rate = dilation_rate
-        self.attention = SelfAttention(hidden_size,
-                                       num_attention_heads,
-                                       attention_probs_dropout_prob,
-                                       initializer_range)
+    def __init__(self, hidden_size, num_attention_heads, all_head_size):
+        super().__init__(hidden_size, num_attention_heads, all_head_size)
 
-    def call(self, inputs, **kwargs):
-        if isinstance(inputs, list):
-            x, mask = inputs
-        else:
-            x, mask = inputs, None
-
-        # 序列长度、编码维度
-        seq_len, seq_dim = x.get_shape()[1:]
-        # 计算需要补长多少，余数是指有几个数没办法组成一组，和dilation_rate相减就是补0的个数
-        pad_len = self.dilation_rate - seq_len % self.dilation_rate
-        # 在序列长度的维度补0
-        x = tf.pad(x, paddings=[[0, 0], [0, pad_len], [0, 0]])
-        new_seq_len = tf.shape(x)[1]
-        # 把间隔dilation_rate的元素放在一组
-        x = tf.reshape(x, [-1, new_seq_len // self.dilation_rate, self.dilation_rate, seq_dim])
-        x = tf.transpose(x, [0, 2, 1, 3])
-        x = tf.reshape(x, [-1, new_seq_len, seq_dim])
-        # attention
-        x = self.attention([x, x, x], mask=mask)
-        #  转变回原来的维度
-        x = tf.reshape(x, [-1, self.dilation_rate, new_seq_len // self.dilation_rate, seq_dim])
-        x = tf.transpose(x, [0, 2, 1, 3])
-        x = tf.reshape(x, [-1, new_seq_len, seq_dim])
-        # 把补0的元素去除
-        x = x[:, : -pad_len]
-
-        return x
-
-
-class TestModel(Layer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.embedding = Embedding(88586, 256)
-        self.attention = DilationAttention(64, 4)
-        self.act = Dense(1, activation='sigmoid')
-
-    def call(self, inputs, training=None, mask=None):
-        x, mask = inputs
-        x = self.embedding(inputs)
-        x = self.attention([x, x, x, mask])
-        x = tf.reduce_mean(x, axis=1)
-        x = self.act(x)
-        return x
+    def forward(self, x):
+        x, q, k, v = super().forward(x)
+        out_shape = x.size()
+        # [batch, hidden, len, 1]
+        q = q / q.norm(dim=-1, keepdim=True)
+        # [batch, hidden, len, 1]
+        k = k / k.norm(dim=-1, keepdim=True)
+        # [batch, hidden, len, 1]
+        kv = (k * v).sum(dim=-2, keepdim=True)
+        out = q * kv
+        out = out.permute(0, 2, 1, 3)
+        out = out.reshape(out_shape)
+        return out
 
 
 if __name__ == '__main__':
-    imdb = tf.keras.datasets.imdb
-    (x_train, y_train), (x_test, y_test) = imdb.load_data()
-    x_train = pad_sequences(x_train, 200)
+    import time
 
-    x = Input([200, ],dtype='int32')
-    mask = Input([200, ],dtype='int32')
-
-    out = TestModel([x, mask])
-    model = Model(([x, mask], out))
-    model.compile(
-        loss='sparse_categorical_crossentropy',
-        optimizer=tf.keras.optimizers.Adam(1e-5),
-        metrics=['accuracy']
-    )
-    import numpy as np
-
-    m = np.ones([25000, 200])
-    model.fit([x_train, m], y_train, batch_size=32, epochs=1)
+    s = time.time()
+    attention = HydraAttention(768, 768, 768)
+    # attention = SelfAttention(768, 12, 768)
+    for _ in range(10):
+        r = attention(torch.rand((2, 500, 768)))
+    print(time.time() - s)
