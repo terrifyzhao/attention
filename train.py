@@ -43,6 +43,14 @@ class MyTrainer(TMTextTrainer):
 
 
 if __name__ == '__main__':
-    model = Model(21128, 768, 4)
-    trainer = MyTrainer(model=model, max_length=32, batch_size=12, lr=5e-5, monitor='acc')
-    trainer.run()
+
+    for i in range(12):
+        print('层数：', i + 1)
+        model = Model(21128, 768, 4, i + 1)
+        trainer = MyTrainer(model=model, max_length=32, batch_size=64, lr=1e-3, monitor='acc',use_amp=True)
+        import time
+
+        s = time.time()
+        trainer.run()
+        print('总耗时:')
+        print(time.time() - s)
