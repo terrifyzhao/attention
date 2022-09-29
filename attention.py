@@ -4,7 +4,7 @@ import math
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, hidden_size, num_attention_heads, all_head_size):
+    def __init__(self, hidden_size, num_attention_heads, all_head_size, relax=False):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
@@ -15,6 +15,8 @@ class SelfAttention(nn.Module):
         self.query = nn.Linear(hidden_size, all_head_size)
         self.key = nn.Linear(hidden_size, all_head_size)
         self.value = nn.Linear(hidden_size, all_head_size)
+
+        self.relax = relax
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.head_size)
@@ -34,6 +36,9 @@ class SelfAttention(nn.Module):
         attention_scores = torch.matmul(q, k.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.head_size)
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        if self.relax:
+            gamma = torch.randn(1).to(x.device)
+            attention_probs = (1 - gamma) * attention_probs + (gamma * 1 / out_shape[1])
         out = torch.matmul(attention_probs, v)
         out = out.permute(0, 2, 1, 3)
         out = out.reshape(out_shape)

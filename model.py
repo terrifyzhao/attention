@@ -9,7 +9,7 @@ class Model(nn.Module):
         self.embedding = nn.Embedding(vocab_size, hidden_size)
 
         self.model_list = nn.ModuleList(
-            [HydraAttention(hidden_size, hidden_size, hidden_size) for _ in range(layer_num)])
+            [SelfAttention(hidden_size, hidden_size, hidden_size, relax=True) for _ in range(layer_num)])
 
         self.layer_norm = nn.LayerNorm(hidden_size)
         self.dense = nn.Linear(hidden_size, num_labels)
